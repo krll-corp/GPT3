@@ -1,13 +1,16 @@
 # evaluate.py
 
-import torch
-import torch.nn as nn
-from transformers import GPT2TokenizerFast, GPT2LMHeadModel, GPT2Config
-from datasets import load_dataset
-import numpy as np
-from tqdm import tqdm
+import argparse
 import gc
 import math
+from typing import List
+
+import numpy as np
+import torch
+import torch.nn as nn
+from datasets import load_dataset
+from tqdm import tqdm
+from transformers import GPT2Config, GPT2LMHeadModel, GPT2TokenizerFast
 
 # ----------------------------
 # Model Definitions
@@ -182,7 +185,18 @@ def load_model_and_tokenizer(model_path, device):
 # Evaluation Functions
 # ----------------------------
 
-def evaluate_on_hellaswag(model, tokenizer, device, temperature=None, top_k=None, top_p=None, min_p=None, batch_size=8, block_size=512):
+def evaluate_on_hellaswag(
+    model,
+    tokenizer,
+    device,
+    *,
+    temperature=None,
+    top_k=None,
+    top_p=None,
+    min_p=None,
+    batch_size=8,
+    block_size=512,
+):
     print("\nStarting HellaSwag Evaluation...\n")
     # Load HellaSwag validation dataset
     hellaswag_dataset = load_dataset("Rowan/hellaswag", split="validation")
@@ -259,13 +273,25 @@ def evaluate_on_hellaswag(model, tokenizer, device, temperature=None, top_k=None
             total += actual_batch_size
             correct += (predicted_labels == labels_tensor).sum().item()
 
-    accuracy = correct / total
+    accuracy = correct / total if total else float("nan")
     hellaswag_perplexity = math.exp(hellaswag_loss_sum / hellaswag_token_count) if hellaswag_token_count > 0 else float('inf')
     print(f"\nHellaSwag Accuracy: {accuracy:.4f}")
     print(f"HellaSwag Perplexity: {hellaswag_perplexity:.4f}")
     return accuracy
 
-def evaluate_on_mmlu(model, tokenizer, device, temperature=None, top_k=None, top_p=None, min_p=None, batch_size=8, block_size=512, task='abstract_algebra'):
+def evaluate_on_mmlu(
+    model,
+    tokenizer,
+    device,
+    *,
+    temperature=None,
+    top_k=None,
+    top_p=None,
+    min_p=None,
+    batch_size=8,
+    block_size=512,
+    task='abstract_algebra',
+):
     print(f"\nStarting MMLU Evaluation on task: {task}\n")
     # Load MMLU dataset with the correct subtask name
     try:
@@ -350,13 +376,24 @@ def evaluate_on_mmlu(model, tokenizer, device, temperature=None, top_k=None, top
             total += actual_batch_size
             correct += (predicted_labels == labels_tensor).sum().item()
 
-    accuracy = correct / total
+    accuracy = correct / total if total else float("nan")
     task_perplexity = math.exp(task_loss_sum / task_token_count) if task_token_count > 0 else float('inf')
     print(f"\nMMLU Accuracy on '{task}': {accuracy:.4f}")
     print(f"MMLU Perplexity on '{task}': {task_perplexity:.4f}")
     return accuracy, task_perplexity
 
-def evaluate_on_lambada(model, tokenizer, device, temperature=None, top_k=None, top_p=None, min_p=None, batch_size=8, block_size=512):
+def evaluate_on_lambada(
+    model,
+    tokenizer,
+    device,
+    *,
+    temperature=None,
+    top_k=None,
+    top_p=None,
+    min_p=None,
+    batch_size=8,
+    block_size=512,
+):
     print("\nStarting LAMBADA Evaluation...\n")
     # Load the LAMBADA test split
     lambada_dataset = load_dataset("lambada", split="test")
@@ -454,7 +491,7 @@ def evaluate_on_lambada(model, tokenizer, device, temperature=None, top_k=None, 
             final_token_correct += (final_token_ids == gold_token_ids).sum().item()
             final_token_total += gold_token_ids.size(0)
     
-    lambada_accuracy = correct / total if total > 0 else 0
+    lambada_accuracy = correct / total if total > 0 else float("nan")
     lambada_perplexity = math.exp(lambada_loss_sum / lambada_token_count) if lambada_token_count > 0 else float('inf')
     final_token_accuracy = final_token_correct / final_token_total if final_token_total > 0 else 0
 
@@ -469,93 +506,108 @@ def evaluate_on_lambada(model, tokenizer, device, temperature=None, top_k=None, 
 # Main Execution
 # ----------------------------
 
-if __name__ == '__main__':
-    # Configuration
-    MODEL_PATH = "local_model_path" #k050506koch/GPT3-dev-125m-0612
-    
-    DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    TEMPERATURE = None #0.7
-    TOP_K = 40
-    TOP_P = 0.95
-    MIN_P = 0.5
-    BATCH_SIZE = 8
-    BLOCK_SIZE = 64
-
-    # Load model and tokenizer
-    model, tokenizer = load_model_and_tokenizer(MODEL_PATH, DEVICE)
-    
-    lambada_accuracy = evaluate_on_lambada(
-        model=model,
-        tokenizer=tokenizer,
-        device=DEVICE,
-        temperature=TEMPERATURE,
-        # top_k=None, top_p=None, min_p=None # optional
-        batch_size=BATCH_SIZE,
-        block_size=BLOCK_SIZE
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Evaluate GPT-3 style checkpoints on public benchmarks.")
+    parser.add_argument("--model", required=True, help="Path or Hugging Face repo id of the model to evaluate.")
+    parser.add_argument("--device", default=None, help="Device identifier, defaults to CUDA if available otherwise CPU.")
+    parser.add_argument("--batch-size", type=int, default=4, help="Batch size for evaluation batches.")
+    parser.add_argument("--block-size", type=int, default=256, help="Maximum sequence length in tokens.")
+    parser.add_argument("--temperature", type=float, default=None, help="Optional temperature applied to logits.")
+    parser.add_argument("--top-k", type=int, default=None, help="Optional top-k sampling filter.")
+    parser.add_argument("--top-p", type=float, default=None, help="Optional top-p sampling filter.")
+    parser.add_argument("--min-p", type=float, default=None, help="Optional minimum probability threshold.")
+    parser.add_argument(
+        "--mmlu-tasks",
+        nargs="*",
+        default=["abstract_algebra"],
+        help="List of MMLU tasks to evaluate. Defaults to a small representative subset.",
     )
-    print(f"LAMBADA Accuracy: {lambada_accuracy:.4f}")
-    gc.collect()
+    parser.add_argument("--run-hellaswag", action="store_true", help="Evaluate on the HellaSwag benchmark.")
+    parser.add_argument("--run-lambada", action="store_true", help="Evaluate on the LAMBADA benchmark.")
+    parser.add_argument("--run-mmlu", action="store_true", help="Evaluate on the specified MMLU tasks.")
+    return parser.parse_args()
 
-    # Evaluate on HellaSwag
-    hellaswag_accuracy = evaluate_on_hellaswag(
-        model=model,
-        tokenizer=tokenizer,
-        device=DEVICE,
-        temperature=TEMPERATURE,
-        batch_size=BATCH_SIZE,
-        block_size=BLOCK_SIZE
+
+def main():
+    args = parse_args()
+
+    device = (
+        torch.device(args.device)
+        if args.device
+        else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     )
-    gc.collect()
-    
-    # Evaluate on MMLU
-    """MMLU_TASK = 'abstract_algebra'  # Change as needed
 
-    mmlu_accuracy = evaluate_on_mmlu(
-        model=model,
-        tokenizer=tokenizer,
-        device=DEVICE,
-        temperature=TEMPERATURE,
-        batch_size=BATCH_SIZE,
-        block_size=BLOCK_SIZE,
-        task=MMLU_TASK
-    )"""
-    
-    mmlu_tasks = [
-        'abstract_algebra', 'anatomy', 'astronomy', 'business_ethics', 'clinical_knowledge',
-        'college_biology', 'college_chemistry', 'college_computer_science', 'college_mathematics',
-        'college_medicine', 'college_physics', 'computer_security', 'conceptual_physics',
-        'econometrics', 'electrical_engineering', 'elementary_mathematics', 'formal_logic',
-        'global_facts', 'high_school_biology', 'high_school_chemistry', 'high_school_computer_science',
-        'high_school_european_history', 'high_school_geography', 'high_school_government_and_politics',
-        'high_school_macroeconomics', 'high_school_mathematics', 'high_school_microeconomics',
-        'high_school_physics', 'high_school_psychology', 'high_school_statistics', 'high_school_us_history',
-        'high_school_world_history', 'human_aging', 'human_sexuality', 'international_law',
-        'jurisprudence', 'logical_fallacies', 'machine_learning', 'management', 'marketing',
-        'medical_genetics', 'miscellaneous', 'moral_disputes', 'moral_scenarios', 'nutrition',
-        'philosophy', 'prehistory', 'professional_accounting', 'professional_law',
-        'professional_medicine', 'professional_psychology', 'public_relations', 'security_studies',
-        'sociology', 'us_foreign_policy', 'virology', 'world_religions'
-    ]
-    scores = []
-    mmlu_perplexities = []
-    for task in mmlu_tasks:
-        mmlu_accuracy, mmlu_perplexity = evaluate_on_mmlu(
+    model, tokenizer = load_model_and_tokenizer(args.model, device)
+
+    results = {}
+
+    if args.run_lambada:
+        lambada_accuracy = evaluate_on_lambada(
             model=model,
             tokenizer=tokenizer,
-            device=DEVICE,
-            temperature=TEMPERATURE,
-            batch_size=BATCH_SIZE,
-            block_size=BLOCK_SIZE,
-            task=task
+            device=device,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            top_p=args.top_p,
+            min_p=args.min_p,
+            batch_size=args.batch_size,
+            block_size=args.block_size,
         )
-        scores.append(mmlu_accuracy)
-        mmlu_perplexities.append(mmlu_perplexity)
+        results["lambada_accuracy"] = lambada_accuracy
+        print(f"LAMBADA Accuracy: {lambada_accuracy:.4f}")
         gc.collect()
 
-    mmlu_average = np.mean(scores)
-    mmlu_average_pp = np.mean(mmlu_perplexities)
-    print(f"MMLU Average Accuracy: {mmlu_average:.4f}")
-    print(f"MMLU Average Perplexity: {mmlu_average_pp:.4f}")
-    
-    # Summary of Results
-    print("Evaluation Completed.")
+    if args.run_hellaswag:
+        hellaswag_accuracy = evaluate_on_hellaswag(
+            model=model,
+            tokenizer=tokenizer,
+            device=device,
+            temperature=args.temperature,
+            top_k=args.top_k,
+            top_p=args.top_p,
+            min_p=args.min_p,
+            batch_size=args.batch_size,
+            block_size=args.block_size,
+        )
+        results["hellaswag_accuracy"] = hellaswag_accuracy
+        gc.collect()
+
+    if args.run_mmlu:
+        mmlu_scores: List[float] = []
+        mmlu_perplexities: List[float] = []
+        for task in args.mmlu_tasks:
+            mmlu_accuracy, mmlu_perplexity = evaluate_on_mmlu(
+                model=model,
+                tokenizer=tokenizer,
+                device=device,
+                temperature=args.temperature,
+                top_k=args.top_k,
+                top_p=args.top_p,
+                min_p=args.min_p,
+                batch_size=args.batch_size,
+                block_size=args.block_size,
+                task=task,
+            )
+            results[f"mmlu_accuracy_{task}"] = mmlu_accuracy
+            results[f"mmlu_perplexity_{task}"] = mmlu_perplexity
+            mmlu_scores.append(mmlu_accuracy)
+            mmlu_perplexities.append(mmlu_perplexity)
+            gc.collect()
+
+        if mmlu_scores:
+            results["mmlu_average_accuracy"] = float(np.nanmean(mmlu_scores))
+            results["mmlu_average_perplexity"] = float(np.nanmean(mmlu_perplexities))
+            print(f"MMLU Average Accuracy: {results['mmlu_average_accuracy']:.4f}")
+            print(f"MMLU Average Perplexity: {results['mmlu_average_perplexity']:.4f}")
+
+    if not results:
+        print("No evaluation tasks were executed. Use --run-hellaswag, --run-lambada or --run-mmlu.")
+        return
+
+    print("\n===== Evaluation Summary =====")
+    for key, value in results.items():
+        print(f"{key}: {value}")
+
+
+if __name__ == '__main__':
+    main()
