@@ -3,7 +3,7 @@
 import argparse
 import gc
 import math
-from typing import List, Optional
+from typing import List
 
 import numpy as np
 import torch
@@ -185,14 +185,6 @@ def load_model_and_tokenizer(model_path, device):
 # Evaluation Functions
 # ----------------------------
 
-def _resolve_max_examples(requested: Optional[int], total: int) -> int:
-    """Return the effective number of examples that should be processed."""
-
-    if requested is None:
-        return total
-    return max(0, min(total, requested))
-
-
 def evaluate_on_hellaswag(
     model,
     tokenizer,
@@ -204,7 +196,6 @@ def evaluate_on_hellaswag(
     min_p=None,
     batch_size=8,
     block_size=512,
-    max_examples: Optional[int] = None,
 ):
     print("\nStarting HellaSwag Evaluation...\n")
     # Load HellaSwag validation dataset
@@ -217,12 +208,7 @@ def evaluate_on_hellaswag(
     hellaswag_loss_sum = 0.0
     hellaswag_token_count = 0
 
-    limit = _resolve_max_examples(max_examples, num_examples)
-    if limit == 0:
-        print("No HellaSwag examples selected for evaluation.")
-        return float("nan")
-
-    for i in tqdm(range(0, limit, batch_size), desc="Evaluating HellaSwag"):
+    for i in tqdm(range(0, num_examples, batch_size), desc="Evaluating HellaSwag"):
         batch = hellaswag_dataset[i:i+batch_size]
 
         # Extract data from the batch
@@ -305,7 +291,6 @@ def evaluate_on_mmlu(
     batch_size=8,
     block_size=512,
     task='abstract_algebra',
-    max_examples: Optional[int] = None,
 ):
     print(f"\nStarting MMLU Evaluation on task: {task}\n")
     # Load MMLU dataset with the correct subtask name
@@ -328,12 +313,7 @@ def evaluate_on_mmlu(
     task_loss_sum = 0.0
     task_token_count = 0
 
-    limit = _resolve_max_examples(max_examples, num_examples)
-    if limit == 0:
-        print(f"No MMLU examples selected for task '{task}'.")
-        return float("nan"), float("inf")
-
-    for i in tqdm(range(0, limit, batch_size), desc=f"Evaluating MMLU ({task})"):
+    for i in tqdm(range(0, num_examples, batch_size), desc=f"Evaluating MMLU ({task})"):
         batch = mmlu_dataset[i:i + batch_size]
 
         # Extract data from the batch
@@ -413,7 +393,6 @@ def evaluate_on_lambada(
     min_p=None,
     batch_size=8,
     block_size=512,
-    max_examples: Optional[int] = None,
 ):
     print("\nStarting LAMBADA Evaluation...\n")
     # Load the LAMBADA test split
@@ -427,12 +406,7 @@ def evaluate_on_lambada(
     final_token_correct = 0
     final_token_total = 0
     
-    limit = _resolve_max_examples(max_examples, num_examples)
-    if limit == 0:
-        print("No LAMBADA examples selected for evaluation.")
-        return float("nan")
-
-    for i in tqdm(range(0, limit, batch_size), desc="Evaluating LAMBADA"):
+    for i in tqdm(range(0, num_examples, batch_size), desc="Evaluating LAMBADA"):
         batch = lambada_dataset[i:i+batch_size]
     
         sentences = batch['text']
@@ -542,7 +516,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=None, help="Optional top-k sampling filter.")
     parser.add_argument("--top-p", type=float, default=None, help="Optional top-p sampling filter.")
     parser.add_argument("--min-p", type=float, default=None, help="Optional minimum probability threshold.")
-    parser.add_argument("--max-examples", type=int, default=64, help="Maximum number of evaluation examples per dataset.")
     parser.add_argument(
         "--mmlu-tasks",
         nargs="*",
@@ -579,7 +552,6 @@ def main():
             min_p=args.min_p,
             batch_size=args.batch_size,
             block_size=args.block_size,
-            max_examples=args.max_examples,
         )
         results["lambada_accuracy"] = lambada_accuracy
         print(f"LAMBADA Accuracy: {lambada_accuracy:.4f}")
@@ -596,7 +568,6 @@ def main():
             min_p=args.min_p,
             batch_size=args.batch_size,
             block_size=args.block_size,
-            max_examples=args.max_examples,
         )
         results["hellaswag_accuracy"] = hellaswag_accuracy
         gc.collect()
@@ -616,7 +587,6 @@ def main():
                 batch_size=args.batch_size,
                 block_size=args.block_size,
                 task=task,
-                max_examples=args.max_examples,
             )
             results[f"mmlu_accuracy_{task}"] = mmlu_accuracy
             results[f"mmlu_perplexity_{task}"] = mmlu_perplexity

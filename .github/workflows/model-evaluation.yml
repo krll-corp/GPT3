@@ -42,5 +42,4 @@ jobs:
             --run-mmlu \
             --mmlu-tasks abstract_algebra \
             --batch-size 2 \
-            --block-size 128 \
-            --max-examples 16
+            --block-size 128
