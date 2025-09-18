@@ -45,25 +45,79 @@ class CustomGPT2MLP(GPT2MLP):
         self.act = nn.GELU()  # Use standard GeLU
 
 class CustomGPT2Block(GPT2Block):
-    def __init__(self, config):
+    def __init__(self, config, layer_idx=0):
         super().__init__(config)
         self.use_pre_layernorm = config.use_pre_layernorm
+        self.layer_idx = layer_idx
         self.ln_1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
         self.attn = CustomGPT2Attention(config)
         self.mlp = CustomGPT2MLP(4 * config.n_embd, config)
         self.ln_2 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
 
-    def forward(
-        self,
-        hidden_states,
-        layer_past=None,
-        attention_mask=None,
-        head_mask=None,
-        encoder_hidden_states=None,
-        encoder_attention_mask=None,
-        use_cache=False,
-        output_attentions=False,
-    ):
+    def forward(self, hidden_states, *args, **kwargs):
+        """Forward pass compatible with multiple Transformers releases.
+
+        Modern ``transformers`` versions renamed several GPT-2 block
+        parameters (e.g. ``layer_past`` → ``past_key_values``) and introduced
+        additional optional arguments like ``cache_position``.  Some releases
+        also pass the same value positionally *and* via keyword which used to
+        trip up our override.  To keep this shim resilient we capture both
+        positional and keyword arguments, normalise the names to ones our
+        custom block understands, and gracefully ignore anything we do not
+        explicitly handle.
+        """
+
+        param_order = [
+            "past_key_values",
+            "cache_position",
+            "attention_mask",
+            "head_mask",
+            "encoder_hidden_states",
+            "encoder_attention_mask",
+            "use_cache",
+            "output_attentions",
+        ]
+
+        params = {}
+        for name, value in zip(param_order, args):
+            if name not in params:
+                params[name] = value
+        params.update(kwargs)
+
+        # Backwards compatibility with older caller names
+        if "layer_past" in params and "past_key_values" not in params:
+            params["past_key_values"] = params.pop("layer_past")
+        if "past_key_value" in params and "past_key_values" not in params:
+            params["past_key_values"] = params.pop("past_key_value")
+
+        past_key_values = params.pop("past_key_values", None)
+        cache_position = params.pop("cache_position", None)
+        attention_mask = params.pop("attention_mask", None)
+        head_mask = params.pop("head_mask", None)
+        encoder_hidden_states = params.pop("encoder_hidden_states", None)
+        encoder_attention_mask = params.pop("encoder_attention_mask", None)
+        use_cache = params.pop("use_cache", False)
+        output_attentions = params.pop("output_attentions", False)
+
+        # Convert the cache object used in modern Transformers versions into
+        # the tuple-based format expected by the legacy GPT-3 style blocks.
+        layer_past = None
+        if past_key_values is not None:
+            if hasattr(past_key_values, "to_legacy_cache"):
+                legacy_cache = past_key_values.to_legacy_cache()
+                try:
+                    layer_past = legacy_cache[self.layer_idx]
+                except (TypeError, IndexError):
+                    layer_past = None
+            else:
+                layer_past = past_key_values
+
+        # ``cache_position`` is not used by these custom blocks but consuming it
+        # prevents unexpected keyword argument failures when newer callers
+        # provide it.  Keeping the variable defined also makes debugging easier
+        # if we ever need to add support for it in the future.
+        _ = cache_position
+
         if self.use_pre_layernorm:
             # Pre-LayerNorm
             residual = hidden_states
@@ -124,7 +178,9 @@ class CustomGPT2Model(GPT2Model):
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         self.wpe = nn.Embedding(config.n_positions, config.n_embd)
         self.drop = nn.Dropout(config.embd_pdrop)
-        self.h = nn.ModuleList([CustomGPT2Block(config) for _ in range(config.n_layer)])
+        self.h = nn.ModuleList(
+            [CustomGPT2Block(config, layer_idx=i) for i in range(config.n_layer)]
+        )
         self.ln_f = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
 
         self.init_weights()

@@ -92,25 +92,69 @@ class GPT3DevMLP(GPT2MLP):
         self.act = nn.GELU()  # Use standard GeLU
 
 class GPT3DevBlock(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config, layer_idx=0):
         super().__init__()
         self.use_pre_layernorm = config.use_pre_layernorm
+        self.layer_idx = layer_idx
         self.ln_1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
         self.attn = GPT3DevAttention(config)
         self.mlp = GPT3DevMLP(4 * config.n_embd, config)
         self.ln_2 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
 
-    def forward(
-        self,
-        hidden_states,
-        layer_past=None,
-        attention_mask=None,
-        head_mask=None,
-        encoder_hidden_states=None,
-        encoder_attention_mask=None,
-        use_cache=False,
-        output_attentions=False,
-    ):
+    def forward(self, hidden_states, *args, **kwargs):
+        """Align the block forward signature with upstream GPT-2.
+
+        Hugging Face frequently renames GPT-2 block parameters and adds new
+        optional values (``cache_position`` etc.).  Accepting both positional
+        and keyword arguments, normalising their names, and discarding any
+        extras keeps the custom GPT-3 dev implementation compatible across
+        releases.
+        """
+
+        param_order = [
+            "past_key_values",
+            "cache_position",
+            "attention_mask",
+            "head_mask",
+            "encoder_hidden_states",
+            "encoder_attention_mask",
+            "use_cache",
+            "output_attentions",
+        ]
+
+        params = {}
+        for name, value in zip(param_order, args):
+            if name not in params:
+                params[name] = value
+        params.update(kwargs)
+
+        if "layer_past" in params and "past_key_values" not in params:
+            params["past_key_values"] = params.pop("layer_past")
+        if "past_key_value" in params and "past_key_values" not in params:
+            params["past_key_values"] = params.pop("past_key_value")
+
+        past_key_values = params.pop("past_key_values", None)
+        cache_position = params.pop("cache_position", None)
+        attention_mask = params.pop("attention_mask", None)
+        head_mask = params.pop("head_mask", None)
+        encoder_hidden_states = params.pop("encoder_hidden_states", None)
+        encoder_attention_mask = params.pop("encoder_attention_mask", None)
+        use_cache = params.pop("use_cache", False)
+        output_attentions = params.pop("output_attentions", False)
+
+        layer_past = None
+        if past_key_values is not None:
+            if hasattr(past_key_values, "to_legacy_cache"):
+                legacy_cache = past_key_values.to_legacy_cache()
+                try:
+                    layer_past = legacy_cache[self.layer_idx]
+                except (TypeError, IndexError):
+                    layer_past = None
+            else:
+                layer_past = past_key_values
+
+        _ = cache_position
+
         if self.use_pre_layernorm:
             # Pre-LayerNorm
             residual = hidden_states
@@ -172,7 +216,9 @@ class GPT3DevModel(nn.Module):
         self.wte = nn.Embedding(config.vocab_size, config.n_embd)
         self.wpe = nn.Embedding(config.n_positions, config.n_embd)
         self.drop = nn.Dropout(config.embd_pdrop)
-        self.h = nn.ModuleList([GPT3DevBlock(config) for _ in range(config.n_layer)])
+        self.h = nn.ModuleList(
+            [GPT3DevBlock(config, layer_idx=i) for i in range(config.n_layer)]
+        )
         self.ln_f = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
 
     def forward(self, input_ids=None, past_key_values=None, attention_mask=None,
