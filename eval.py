@@ -1,18 +1,27 @@
 import argparse
 import gc
 import math
-from typing import List
+from typing import List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 from datasets import load_dataset
 from tqdm import tqdm
-from transformers import GPT2TokenizerFast, AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-def load_model_and_tokenizer(model_path, device):
-    tokenizer = GPT2TokenizerFast.from_pretrained(model_path)
-    model = AutoModelForCausalLM.from_pretrained(model_path)
+def load_model_and_tokenizer(model_path, device, trust_remote_code: bool = False):
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_path,
+        trust_remote_code=True,
+    )
+    model = AutoModelForCausalLM.from_pretrained(
+        model_path,
+        trust_remote_code=True,
+    )
+
+    if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     print(f"Using device: {device}")
     model.to(device)
@@ -130,7 +139,7 @@ def evaluate_on_mmlu(
     batch_size=8,
     block_size=512,
     task='abstract_algebra',
-):
+) -> Optional[Tuple[float, float]]:
     print(f"\nStarting MMLU Evaluation on task: {task}\n")
     # Load MMLU dataset with the correct subtask name
     try:
@@ -138,7 +147,6 @@ def evaluate_on_mmlu(
             "cais/mmlu",
             task,  # Use the task parameter
             split="test",
-            trust_remote_code=True
         )
         print(f"Loaded dataset for task: {task} with {len(mmlu_dataset)} examples.")
     except Exception as e:
@@ -219,6 +227,9 @@ def evaluate_on_mmlu(
     task_perplexity = math.exp(task_loss_sum / task_token_count) if task_token_count > 0 else float('inf')
     print(f"\nMMLU Accuracy on '{task}': {accuracy:.4f}")
     print(f"MMLU Perplexity on '{task}': {task_perplexity:.4f}")
+    if model.device.type == 'mps':
+        torch.mps.empty_cache()
+    
     return accuracy, task_perplexity
 
 def evaluate_on_lambada(
@@ -358,12 +369,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mmlu-tasks",
         nargs="*",
-        default=["abstract_algebra", "anatomy", "astronomy", "business_ethics", "clinical_knowledge", "college_biology", "college_chemistry", "college_computer_science", "college_mathematics", "college_medicine", "college_physics", "computer_science", "econometrics", "electrical_engineering", "elementary_mathematics", "formal_logic", "global_facts", "high_school_biology", "high_school_chemistry", "high_school_computer_science", "high_school_european_history", "high_school_geography", "high_school_government_and_politics", "high_school_macroeconomics", "high_school_mathematics", "high_school_microeconomics", "high_school_physics", "high_school_psychology", "high_school_statistics", "high_school_us_history", "human_aging", "human_sexuality"], #i want all of them
+        default=["abstract_algebra", "anatomy", "astronomy", "business_ethics", "clinical_knowledge", "college_biology", "college_chemistry", "college_computer_science", "college_mathematics", "college_medicine", "college_physics", "computer_security", "econometrics", "electrical_engineering", "elementary_mathematics", "formal_logic", "global_facts", "high_school_biology", "high_school_chemistry", "high_school_computer_science", "high_school_european_history", "high_school_geography", "high_school_government_and_politics", "high_school_macroeconomics", "high_school_mathematics", "high_school_microeconomics", "high_school_physics", "high_school_psychology", "high_school_statistics", "high_school_us_history", "human_aging", "human_sexuality"],
         help="List of MMLU tasks to evaluate. Defaults to a small representative subset.",
     )
     parser.add_argument("--run-hellaswag", action="store_true", help="Evaluate on the HellaSwag benchmark.")
     parser.add_argument("--run-lambada", action="store_true", help="Evaluate on the LAMBADA benchmark.")
     parser.add_argument("--run-mmlu", action="store_true", help="Evaluate on the specified MMLU tasks.")
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Allow execution of custom code when loading model/tokenizer from local or Hub repos.",
+    )
     return parser.parse_args()
 
 
@@ -376,7 +392,11 @@ def main():
         else torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     )
 
-    model, tokenizer = load_model_and_tokenizer(args.model, device)
+    model, tokenizer = load_model_and_tokenizer(
+        args.model,
+        device,
+        trust_remote_code=args.trust_remote_code,
+    )
 
     results = {}
 
@@ -415,7 +435,7 @@ def main():
         mmlu_scores: List[float] = []
         mmlu_perplexities: List[float] = []
         for task in args.mmlu_tasks:
-            mmlu_accuracy, mmlu_perplexity = evaluate_on_mmlu(
+            mmlu_result = evaluate_on_mmlu(
                 model=model,
                 tokenizer=tokenizer,
                 device=device,
@@ -427,6 +447,10 @@ def main():
                 block_size=args.block_size,
                 task=task,
             )
+            if mmlu_result is None:
+                print(f"Skipping MMLU task '{task}' due to dataset loading failure.")
+                continue
+            mmlu_accuracy, mmlu_perplexity = mmlu_result
             results[f"mmlu_accuracy_{task}"] = mmlu_accuracy
             results[f"mmlu_perplexity_{task}"] = mmlu_perplexity
             mmlu_scores.append(mmlu_accuracy)
