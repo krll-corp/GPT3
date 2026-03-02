@@ -2,8 +2,8 @@ name: Model Evaluation
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 12 * * 1' #i don't know why, but i need this
+  #schedule:
+  #  - cron: '0 12 * * 1' #i don't know why, but i need this
 
 jobs:
   evaluate:
