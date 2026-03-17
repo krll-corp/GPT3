@@ -9,15 +9,16 @@ import torch.nn as nn
 from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import legacy.modeling_gpt3dev
 
 def load_model_and_tokenizer(model_path, device, trust_remote_code: bool = False):
     tokenizer = AutoTokenizer.from_pretrained(
         model_path,
-        trust_remote_code=True,
+        trust_remote_code=trust_remote_code,
     )
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        trust_remote_code=True,
+        trust_remote_code=trust_remote_code,
     )
 
     if tokenizer.pad_token is None and tokenizer.eos_token is not None:
