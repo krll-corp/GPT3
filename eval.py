@@ -267,12 +267,13 @@ def evaluate_on_lambada(
     
     for i in tqdm(range(0, num_examples, batch_size), desc="Evaluating LAMBADA"):
         batch = lambada_dataset[i:i+batch_size]
-    
+
         sentences = batch['text']
-        # Initialize lists for contexts and target words
+        # Initialize lists for full sentences, contexts, and target words
+        full_sentences = []
         contexts = []
         targets = []
-    
+
         for sentence in sentences:
             # Split the sentence into words
             tokens = sentence.strip().split()
@@ -283,6 +284,7 @@ def evaluate_on_lambada(
             target = tokens[-1]
             # The context is the sentence without the last word
             context = ' '.join(tokens[:-1])
+            full_sentences.append(sentence.strip())
             contexts.append(context)
             targets.append(target)
 
@@ -290,60 +292,64 @@ def evaluate_on_lambada(
         if len(contexts) == 0:
             continue
 
-        # Tokenize the contexts
-        tokenized_inputs = tokenizer(
+        # Tokenize both full sentences and contexts to find target token positions
+        full_tokenized = tokenizer(
+            full_sentences,
+            return_tensors='pt',
+            padding=True,
+            truncation=True,
+            max_length=block_size
+        )
+        context_tokenized = tokenizer(
             contexts,
             return_tensors='pt',
             padding=True,
             truncation=True,
             max_length=block_size
         )
-    
-        input_ids = tokenized_inputs['input_ids'].to(device)
-        attention_mask = tokenized_inputs['attention_mask'].to(device)
-    
+
+        full_input_ids = full_tokenized['input_ids'].to(device)
+        full_attention_mask = full_tokenized['attention_mask'].to(device)
+        context_lengths = context_tokenized['attention_mask'].sum(dim=1)
+
         with torch.no_grad():
             outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=input_ids
+                input_ids=full_input_ids,
+                attention_mask=full_attention_mask,
             )
-            # Handle tuple return: (loss, logits) when labels are provided
+            # Handle tuple return: (logits,) when labels are not provided
             if isinstance(outputs, tuple):
-                logits = outputs[1]
+                logits = outputs[0]
             else:
                 logits = outputs.logits
             if temperature is not None:
                 logits = logits / temperature
 
-            if top_k is not None or top_p is not None or min_p is not None:
-                probs = torch.nn.functional.softmax(logits, dim=-1)
-                if top_k:
-                    topk_vals, _ = torch.topk(probs, top_k, dim=-1)
-                    thresh = topk_vals[..., -1, None]
-                    probs = torch.where(probs < thresh, torch.zeros_like(probs), probs)
+            # For LAMBADA, we only care about predicting the last word
+            # Get the logits at the position just before where the target starts
+            # The model predicts the next token, so logits[:, context_len-1, :] predicts token at context_len
+            batch_size_actual = len(contexts)
+            final_token_correct_batch = 0
 
-                if top_p:
-                    sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
-                    cumsum_probs = torch.cumsum(sorted_probs, dim=-1)
-                    cutoff = (cumsum_probs > top_p).float().cumsum(dim=-1)
-                    sorted_probs = torch.where(cutoff > 0, torch.zeros_like(sorted_probs), sorted_probs)
-                    probs = torch.zeros_like(probs).scatter_(-1, sorted_indices, sorted_probs)
+            for idx in range(batch_size_actual):
+                # Position in the context where we want to predict the next token
+                context_len = context_lengths[idx].item()
+                # Get logits at position context_len - 1 (predicts token at context_len)
+                if context_len < full_input_ids.shape[1]:
+                    next_token_logits = logits[idx, context_len - 1, :]
+                    predicted_token_id = torch.argmax(next_token_logits).item()
+                    # The actual target token is at position context_len
+                    actual_token_id = full_input_ids[idx, context_len].item()
 
-                if min_p:
-                    probs = torch.where(probs < min_p, torch.zeros_like(probs), probs)
+                    if predicted_token_id == actual_token_id:
+                        final_token_correct_batch += 1
 
-                probs = probs / probs.sum(dim=-1, keepdim=True)
-                predicted_ids = torch.multinomial(probs.view(-1, probs.size(-1)), 1).view(probs.size(0), -1)
-            else:
-                predicted_ids = torch.argmax(logits, dim=-1)
+            final_token_correct += final_token_correct_batch
+            final_token_total += batch_size_actual
 
-            correct += (predicted_ids == input_ids).sum().item()
-            total += torch.numel(input_ids)
-
-            # Shift logits and labels for loss
+            # Shift logits and labels for perplexity calculation
             shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = input_ids[..., 1:].contiguous()
+            shift_labels = full_input_ids[..., 1:].contiguous()
             loss_fct = nn.CrossEntropyLoss(reduction='none')
             loss_per_token = loss_fct(
                 shift_logits.view(-1, shift_logits.size(-1)),
@@ -351,20 +357,12 @@ def evaluate_on_lambada(
             )
             lambada_loss_sum += loss_per_token.sum().item()
             lambada_token_count += shift_labels.numel()
-
-            # Final-token accuracy fix
-            final_token_ids = predicted_ids[:, -1]
-            gold_token_ids = input_ids[:, -1]
-            final_token_correct += (final_token_ids == gold_token_ids).sum().item()
-            final_token_total += gold_token_ids.size(0)
     
-    lambada_accuracy = correct / total if total > 0 else float("nan")
     lambada_perplexity = math.exp(lambada_loss_sum / lambada_token_count) if lambada_token_count > 0 else float('inf')
-    final_token_accuracy = final_token_correct / final_token_total if final_token_total > 0 else 0
+    lambada_accuracy = final_token_correct / final_token_total if final_token_total > 0 else 0
 
-    print(f"\nLAMBADA Token-by-Token Accuracy: {lambada_accuracy:.4f}")
+    print(f"\nLAMBADA Accuracy (predicting last word): {lambada_accuracy:.4f}")
     print(f"LAMBADA Perplexity: {lambada_perplexity:.4f}")
-    print(f"Final Token Accuracy: {final_token_accuracy:.4f}")
     return lambada_accuracy
 
 
