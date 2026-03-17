@@ -1,3 +1,17 @@
+"""
+GPT-3 Dev Model Implementation - Version-Agnostic
+
+This module implements a custom GPT-3 style model (with pre-LayerNorm) that works
+across multiple versions of the transformers library without version-specific code.
+
+Key features for version compatibility:
+- Runtime detection of attention mask formats (2D, 3D, 4D)
+- Helper functions for consistent mask preparation
+- Flexible parameter handling for API changes
+- No hard dependencies on specific transformers versions
+
+Tested with transformers >= 4.30.0
+"""
 import math
 import torch
 import torch.nn as nn
@@ -14,6 +28,68 @@ from transformers import (
 from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
+
+
+def _prepare_4d_attention_mask(mask, dtype, tgt_len=None):
+    """
+    Version-agnostic attention mask preparation.
+
+    Creates a 4D attention mask from a 2D or 3D mask, compatible with all transformers versions.
+    This helper handles the mask formatting that changed across transformers versions.
+
+    Args:
+        mask: Input mask tensor of shape [batch, seq_len] or [batch, 1, seq_len]
+        dtype: Target dtype for the mask
+        tgt_len: Target sequence length (for cross-attention, otherwise None)
+
+    Returns:
+        4D mask of shape [batch, 1, tgt_len, src_len] with 0 for valid positions and large negative for masked
+    """
+    batch_size, src_len = mask.shape[0], mask.shape[-1]
+    tgt_len = tgt_len if tgt_len is not None else src_len
+
+    # Expand mask to 4D: [batch, 1, tgt_len, src_len]
+    if mask.dim() == 2:
+        # [batch, src_len] -> [batch, 1, 1, src_len]
+        expanded_mask = mask[:, None, None, :]
+    elif mask.dim() == 3:
+        # [batch, 1, src_len] -> [batch, 1, 1, src_len]
+        expanded_mask = mask[:, :, None, :] if mask.shape[1] == 1 else mask[:, None, :, :]
+    else:
+        # Already 4D or higher, return as-is
+        return mask
+
+    # Broadcast to [batch, 1, tgt_len, src_len] if needed
+    if tgt_len > 1 and expanded_mask.shape[2] == 1:
+        expanded_mask = expanded_mask.expand(batch_size, 1, tgt_len, src_len)
+
+    # Convert to additive mask: 1 (valid) -> 0, 0 (masked) -> large negative
+    expanded_mask = expanded_mask.to(dtype=dtype)
+    inverted_mask = 1.0 - expanded_mask
+    return inverted_mask.masked_fill(inverted_mask.to(torch.bool), torch.finfo(dtype).min)
+
+
+def _make_causal_mask(seq_len, dtype, device):
+    """
+    Version-agnostic causal mask creation.
+
+    Creates a causal attention mask that prevents attending to future positions.
+    Works consistently across all transformers versions.
+
+    Args:
+        seq_len: Sequence length
+        dtype: Data type for the mask
+        device: Device to create the mask on
+
+    Returns:
+        Causal mask of shape [1, 1, seq_len, seq_len]
+    """
+    # Create upper triangular matrix (1s above diagonal, 0s on and below)
+    mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=1)
+    # Convert to additive mask: 0 for valid positions, large negative for masked positions
+    mask = mask.to(dtype=dtype)
+    mask = mask.masked_fill(mask.to(torch.bool), torch.finfo(dtype).min)
+    return mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
 
 class GPT3DevConfig(GPT2Config):
     model_type = "gpt3dev"
@@ -68,16 +144,19 @@ class GPT3DevAttention(nn.Module):
 
         attn_scores = torch.matmul(query, key.transpose(-1, -2)) * self.scale
 
-        # Apply attention mask if provided
-        # The mask shape in newer transformers may be [batch, 1, 1, key_len] or [batch, 1, query_len, key_len]
-        # We need to ensure it's broadcastable to [batch, num_heads, query_len, key_len]
+        # Apply attention mask if provided (version-agnostic handling)
         if attention_mask is not None:
-            # If mask is 2D [batch, key_len], expand to [batch, 1, 1, key_len]
+            # Handle different mask formats from different transformers versions
             if attention_mask.dim() == 2:
+                # [batch, key_len] format - expand to 4D
                 attention_mask = attention_mask[:, None, None, :]
-            # If mask is 3D [batch, 1, key_len], expand to [batch, 1, 1, key_len]
             elif attention_mask.dim() == 3:
-                attention_mask = attention_mask[:, None, :, :]
+                # [batch, 1, key_len] or [batch, query_len, key_len] format
+                if attention_mask.shape[1] == 1:
+                    attention_mask = attention_mask[:, :, None, :]
+                else:
+                    attention_mask = attention_mask[:, None, :, :]
+            # attention_mask is now [batch, 1, query_len, key_len] or broadcastable to it
             attn_scores = attn_scores + attention_mask
 
         attn_probs = nn.functional.softmax(attn_scores, dim=-1)
@@ -243,33 +322,24 @@ class GPT3DevModel(nn.Module):
         hidden_states = inputs_embeds + position_embeds
         hidden_states = self.drop(hidden_states)
 
-        # Prepare attention mask for causal attention
-        # Create a causal mask: [batch, 1, seq_len, seq_len]
-        causal_mask = torch.triu(
-            torch.ones((seq_len, seq_len), dtype=torch.bool, device=input_ids.device),
-            diagonal=1
-        )
-        # Convert to float and apply large negative value for masking
-        causal_mask = causal_mask.to(dtype=hidden_states.dtype) * -1e9
-        causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
+        # Create causal attention mask (version-agnostic)
+        # This prevents attending to future positions
+        causal_mask = _make_causal_mask(seq_len, hidden_states.dtype, input_ids.device)
 
-        # Combine with provided attention_mask if given
+        # Combine with padding mask if provided
         if attention_mask is not None:
-            # attention_mask is typically [batch, seq_len] with 1s for valid positions
-            # We need to convert it to additive mask format
-            if attention_mask.dim() == 2:
-                # Expand to [batch, 1, 1, seq_len] for broadcasting
-                attention_mask = attention_mask[:, None, None, :]
-                # Convert 0s to -inf, 1s to 0
-                attention_mask = (1.0 - attention_mask.to(dtype=hidden_states.dtype)) * -1e9
-
-            # Combine causal mask with attention mask
-            causal_mask = causal_mask + attention_mask
+            # attention_mask is typically [batch, seq_len] with 1s for valid positions, 0s for padding
+            # Convert to 4D additive mask format
+            padding_mask = _prepare_4d_attention_mask(attention_mask, hidden_states.dtype, tgt_len=seq_len)
+            # Combine causal and padding masks
+            combined_mask = causal_mask + padding_mask
+        else:
+            combined_mask = causal_mask
 
         for block in self.h:
             hidden_states = block(
                 hidden_states,
-                attention_mask=causal_mask,
+                attention_mask=combined_mask,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
             )[0]
