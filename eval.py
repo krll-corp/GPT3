@@ -92,7 +92,11 @@ def evaluate_on_hellaswag(
                 attention_mask=attention_mask,
                 labels=input_ids
             )
-            logits = outputs.logits
+            # Handle tuple return: (loss, logits) when labels are provided
+            if isinstance(outputs, tuple):
+                logits = outputs[1]
+            else:
+                logits = outputs.logits
             if temperature is not None:
                 logits = logits / temperature
 
@@ -194,7 +198,11 @@ def evaluate_on_mmlu(
                 attention_mask=attention_mask,
                 labels=input_ids
             )
-            logits = outputs.logits
+            # Handle tuple return: (loss, logits) when labels are provided
+            if isinstance(outputs, tuple):
+                logits = outputs[1]
+            else:
+                logits = outputs.logits
             if temperature is not None:
                 logits = logits / temperature
 
@@ -300,7 +308,11 @@ def evaluate_on_lambada(
                 attention_mask=attention_mask,
                 labels=input_ids
             )
-            logits = outputs.logits
+            # Handle tuple return: (loss, logits) when labels are provided
+            if isinstance(outputs, tuple):
+                logits = outputs[1]
+            else:
+                logits = outputs.logits
             if temperature is not None:
                 logits = logits / temperature
 
