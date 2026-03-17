@@ -67,8 +67,19 @@ class GPT3DevAttention(nn.Module):
         present = (key, value) if use_cache else None
 
         attn_scores = torch.matmul(query, key.transpose(-1, -2)) * self.scale
+
+        # Apply attention mask if provided
+        # The mask shape in newer transformers may be [batch, 1, 1, key_len] or [batch, 1, query_len, key_len]
+        # We need to ensure it's broadcastable to [batch, num_heads, query_len, key_len]
         if attention_mask is not None:
+            # If mask is 2D [batch, key_len], expand to [batch, 1, 1, key_len]
+            if attention_mask.dim() == 2:
+                attention_mask = attention_mask[:, None, None, :]
+            # If mask is 3D [batch, 1, key_len], expand to [batch, 1, 1, key_len]
+            elif attention_mask.dim() == 3:
+                attention_mask = attention_mask[:, None, :, :]
             attn_scores = attn_scores + attention_mask
+
         attn_probs = nn.functional.softmax(attn_scores, dim=-1)
         attn_probs = self.attn_dropout(attn_probs)
         if head_mask is not None:
@@ -232,10 +243,33 @@ class GPT3DevModel(nn.Module):
         hidden_states = inputs_embeds + position_embeds
         hidden_states = self.drop(hidden_states)
 
+        # Prepare attention mask for causal attention
+        # Create a causal mask: [batch, 1, seq_len, seq_len]
+        causal_mask = torch.triu(
+            torch.ones((seq_len, seq_len), dtype=torch.bool, device=input_ids.device),
+            diagonal=1
+        )
+        # Convert to float and apply large negative value for masking
+        causal_mask = causal_mask.to(dtype=hidden_states.dtype) * -1e9
+        causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)  # [1, 1, seq_len, seq_len]
+
+        # Combine with provided attention_mask if given
+        if attention_mask is not None:
+            # attention_mask is typically [batch, seq_len] with 1s for valid positions
+            # We need to convert it to additive mask format
+            if attention_mask.dim() == 2:
+                # Expand to [batch, 1, 1, seq_len] for broadcasting
+                attention_mask = attention_mask[:, None, None, :]
+                # Convert 0s to -inf, 1s to 0
+                attention_mask = (1.0 - attention_mask.to(dtype=hidden_states.dtype)) * -1e9
+
+            # Combine causal mask with attention mask
+            causal_mask = causal_mask + attention_mask
+
         for block in self.h:
             hidden_states = block(
                 hidden_states,
-                attention_mask=attention_mask,
+                attention_mask=causal_mask,
                 use_cache=use_cache,
                 output_attentions=output_attentions,
             )[0]
