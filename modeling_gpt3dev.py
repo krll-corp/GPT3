@@ -35,118 +35,63 @@ class GPT3DevConfig(GPT2Config):
 
 
 class GPT3DevAttention(GPT2Attention):  # dense
-    def __init__(self, config, is_cross_attention=False):
-        super().__init__(config, is_cross_attention)
-        # GPT-3 uses biases
+    """GPT-3 style dense attention: nn.Linear instead of Conv1D."""
+    def __init__(self, config, is_cross_attention=False, layer_idx=None):
+        super().__init__(config, is_cross_attention, layer_idx=layer_idx)
+        # GPT-3 uses nn.Linear instead of Conv1D
         self.c_attn = nn.Linear(config.hidden_size, 3 * config.hidden_size, bias=True)
         self.c_proj = nn.Linear(config.hidden_size, config.hidden_size, bias=True)
-
-    def forward(
-        self,
-        hidden_states,
-        layer_past=None,
-        attention_mask=None,
-        head_mask=None,
-        encoder_hidden_states=None,
-        encoder_attention_mask=None,
-        use_cache=None,
-        output_attentions=False,
-        **kwargs,
-    ):
-        #normalize attention_mask shape to 4D if present
-        if attention_mask is not None:
-            if attention_mask.dim() == 1:
-                attention_mask = attention_mask.view(1, 1, 1, -1)
-            elif attention_mask.dim() == 2:
-                attention_mask = attention_mask[:, None, None, :]
-            elif attention_mask.dim() == 3:
-                attention_mask = attention_mask[:, None, :, :]
-
-        # ensure contiguous last dimension for linear with bias
-        hidden_states = hidden_states.contiguous()
-        # head_mask=None to avoid shape incompatibilities with newer transformers
-        # (head causes issues with sparse attention)
-        return super().forward(
-            hidden_states,
-            layer_past=layer_past,
-            attention_mask=attention_mask,
-            head_mask=None,
-            encoder_hidden_states=encoder_hidden_states,
-            encoder_attention_mask=encoder_attention_mask,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-            **kwargs,
-        )
+    # forward() inherited from GPT2Attention — no override needed
 
 
 class GPT3DevSparseAttention(GPT3DevAttention):  # local sparse
-    def __init__(self, config, is_cross_attention=False):
-        super().__init__(config, is_cross_attention)
+    """GPT-3 style locally banded sparse attention."""
+    def __init__(self, config, is_cross_attention=False, layer_idx=None):
+        super().__init__(config, is_cross_attention, layer_idx=layer_idx)
         self.window_size = getattr(config, "window_size", 256)
-        self.stride = getattr(config, "stride", 128)
 
     def forward(
         self,
         hidden_states,
-        layer_past=None,
+        past_key_value=None,
+        cache_position=None,
         attention_mask=None,
         head_mask=None,
         encoder_hidden_states=None,
         encoder_attention_mask=None,
-        use_cache=None,
         output_attentions=False,
+        **kwargs,
     ):
-        hidden_states = hidden_states.contiguous()
-        # here we no longer touch the structure of layer_past — only the fact that it exists or not
         bsz, tgt_len, _ = hidden_states.size()
         device = hidden_states.device
         dtype = hidden_states.dtype
 
-        if layer_past is None:
-            # no cache: regular train / eval without generate
-            seq_len = tgt_len
-            q_pos = torch.arange(0, tgt_len, device=device)
-            k_pos = torch.arange(seq_len, device=device)
+        # Determine query/key positions using cache_position (new API)
+        if cache_position is not None:
+            q_pos = cache_position  # shape: (tgt_len,)
+            seq_len = int(q_pos[-1].item()) + 1
         else:
-            # cache: infer past length from cached keys
-            past_len = 0
-            try:
-                k = layer_past[0]
-                if torch.is_tensor(k):
-                    past_len = k.size(-2)
-            except Exception:
-                past_len = 0
-            seq_len = past_len + tgt_len
-            q_pos = torch.arange(past_len, seq_len, device=device)
-            k_pos = torch.arange(seq_len, device=device)
+            q_pos = torch.arange(tgt_len, device=device)
+            seq_len = tgt_len
+        k_pos = torch.arange(seq_len, device=device)
 
-        #dist[i,j] = pos_q_i - pos_k_j #positive means q is after k
-        diff = q_pos[:, None] - k_pos[None, :]  # (tgt_len, seq_len),signed
-        
-        # CRITICAL: Enforce causal mask first - only attend to past or present
-        is_causal = diff >= 0  # q_pos >= k_pos
-        
-        # local window
+        diff = q_pos[:, None] - k_pos[None, :]  # (tgt_len, seq_len)
+        is_causal = diff >= 0
         within_window = diff.abs() <= self.window_size
-        
-        # strided: attend to tokens at stride intervals, BUT only in the past
-        # only check stride for past tokens (where diff > 0)
-        # for diff > 0: allow if diff is divisible by stride
-        is_strided = (diff > 0) & (diff % self.stride == 0)
-        
+        allow_attention = is_causal & within_window
+        del is_causal, within_window, diff
 
-        allow_attention = is_causal & (within_window | is_strided)
-        del is_causal, within_window, is_strided, diff
-        
-        # convert to additive mask format that transformers expects
-        # True in allow_attention means we CAN attend, so we need to invert for masking
         sparse_mask = torch.zeros((1, 1, tgt_len, seq_len), dtype=dtype, device=device)
         sparse_mask.masked_fill_(~allow_attention, torch.finfo(dtype).min)
         del allow_attention
-        
-        # combine with existing attention mask if present
+
+        # Combine with parent's causal mask
         if attention_mask is not None:
-            # both masks are additive (0 allow, -inf block); take the intersection
+            # Parent may create mask with extra KV positions — trim to match
+            if attention_mask.size(-1) != sparse_mask.size(-1):
+                attention_mask = attention_mask[..., :sparse_mask.size(-1)]
+            if attention_mask.size(-2) != sparse_mask.size(-2):
+                attention_mask = attention_mask[..., :sparse_mask.size(-2), :]
             attention_mask = torch.minimum(attention_mask, sparse_mask)
         else:
             attention_mask = sparse_mask
@@ -154,13 +99,14 @@ class GPT3DevSparseAttention(GPT3DevAttention):  # local sparse
 
         return super().forward(
             hidden_states,
-            layer_past=layer_past,
+            past_key_value=past_key_value,
+            cache_position=cache_position,
             attention_mask=attention_mask,
             head_mask=head_mask,
             encoder_hidden_states=encoder_hidden_states,
             encoder_attention_mask=encoder_attention_mask,
-            use_cache=use_cache,
             output_attentions=output_attentions,
+            **kwargs,
         )
 
 
@@ -173,120 +119,80 @@ class GPT3DevMLP(GPT2MLP):
 
 
 class GPT3DevBlock(GPT2Block):
-    def __init__(self, config, is_sparse: bool = False):
-        super().__init__(config)
+    """GPT-3 block with pre-LayerNorm and alternating dense/sparse attention."""
+    def __init__(self, config, is_sparse: bool = False, layer_idx=None):
+        super().__init__(config, layer_idx=layer_idx)
         self.use_pre_layernorm = config.use_pre_layernorm
         self.ln_1 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
-        
-        if is_sparse:
-            self.attn = GPT3DevSparseAttention(config)  # local sparse
-        else:
-            self.attn = GPT3DevAttention(config)  # dense
-        
-        self.mlp = GPT3DevMLP(4 * config.hidden_size, config)
         self.ln_2 = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
-        
-        #residual projection scaling is applied after post_init in GPT3DevModel
+
+        if is_sparse:
+            self.attn = GPT3DevSparseAttention(config, layer_idx=layer_idx)
+        else:
+            self.attn = GPT3DevAttention(config, layer_idx=layer_idx)
+
+        self.mlp = GPT3DevMLP(4 * config.hidden_size, config)
 
     def forward(
         self,
         hidden_states,
-        layer_past=None,
+        past_key_value=None,
+        cache_position=None,
         attention_mask=None,
         head_mask=None,
         encoder_hidden_states=None,
         encoder_attention_mask=None,
-        use_cache=None,
+        use_cache=False,
         output_attentions=False,
-        cache_position=None,
         **kwargs,
     ):
-        # transformers >= 4.5x: cache is given through past_key_value
-        past_key_value = kwargs.pop("past_key_value", None)
-        if past_key_value is not None:
-            # if layer_past and past_key_value are both provided — this is a bug above
-            if layer_past is not None:
-                raise ValueError("Both layer_past and past_key_value were provided")
-            layer_past = past_key_value
-
-        # transformers GPT2Model passes head mask as layer_head_mask
-        layer_head_mask = kwargs.pop("layer_head_mask", None)
-        if layer_head_mask is not None:
-            if head_mask is not None:
-                raise ValueError("Both head_mask and layer_head_mask were provided")
-            head_mask = layer_head_mask
-
-
-        if attention_mask is not None: #we have to do this or transformers will complain
-            if attention_mask.dim() == 1:
-                attention_mask = attention_mask.view(1, 1, 1, -1)
-            elif attention_mask.dim() == 2:
-                attention_mask = attention_mask[:, None, None, :]
-            elif attention_mask.dim() == 3:
-                attention_mask = attention_mask[:, None, :, :]
-
-        if attention_mask is not None and attention_mask.dtype not in (torch.bool, hidden_states.dtype):
-            # SDPA accepts either a bool mask or a float of the same dtype as query/key/value
-            attention_mask = attention_mask.to(dtype=hidden_states.dtype)
-
-
         if self.use_pre_layernorm:
-            # Pre-LayerNorm, GPT-3
+            # Pre-LayerNorm (GPT-3)
             residual = hidden_states
             hidden_states = self.ln_1(hidden_states)
-            hidden_states = hidden_states.contiguous()
-            attn_outputs = self.attn(
+            attn_output, attn_weights = self.attn(
                 hidden_states,
-                layer_past=layer_past,
+                past_key_value=past_key_value,
+                cache_position=cache_position,
                 attention_mask=attention_mask,
-                head_mask=None,  #disabled for compatibility
+                head_mask=head_mask,
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_attention_mask=encoder_attention_mask,
-                use_cache=use_cache,
                 output_attentions=output_attentions,
+                **kwargs,
             )
-            attn_output = attn_outputs[0]
-            outputs = attn_outputs[1:]  #present,(attentions)
-
             hidden_states = residual + attn_output
 
             residual = hidden_states
             hidden_states = self.ln_2(hidden_states)
-            hidden_states = hidden_states.contiguous()
             feed_forward_hidden_states = self.mlp(hidden_states)
             hidden_states = residual + feed_forward_hidden_states
         else:
-            # Post-LayerNorm, GPT-2
+            # Post-LayerNorm (GPT-2)
             residual = hidden_states
-            hidden_states = hidden_states.contiguous()
-            attn_outputs = self.attn(
+            attn_output, attn_weights = self.attn(
                 hidden_states,
-                layer_past=layer_past,
+                past_key_value=past_key_value,
+                cache_position=cache_position,
                 attention_mask=attention_mask,
-                head_mask=None,  #disabled for compatibility
+                head_mask=head_mask,
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_attention_mask=encoder_attention_mask,
-                use_cache=use_cache,
                 output_attentions=output_attentions,
+                **kwargs,
             )
-            attn_output = attn_outputs[0]
-            outputs = attn_outputs[1:]  #present,(attentions)
-
             hidden_states = residual + attn_output
             hidden_states = self.ln_1(hidden_states)
 
             residual = hidden_states
-            residual = residual.contiguous()
             feed_forward_hidden_states = self.mlp(hidden_states)
             hidden_states = residual + feed_forward_hidden_states
             hidden_states = self.ln_2(hidden_states)
 
-        if use_cache:
-            outputs = (hidden_states,) + outputs
-        else:
-            outputs = (hidden_states,) + outputs[1:]
-
-        return outputs  # hidden_states, present, (attentions)
+        outputs = (hidden_states,)
+        if output_attentions:
+            outputs += (attn_weights,)
+        return outputs
 
 
 class GPT3DevModel(GPT2Model):
@@ -300,19 +206,15 @@ class GPT3DevModel(GPT2Model):
         self.drop = nn.Dropout(config.embd_pdrop)
         self.h = nn.ModuleList()
         for i in range(config.num_hidden_layers):
-            block = GPT3DevBlock(config, is_sparse=(i % 2 == 1))
-
-            if hasattr(block.attn, "layer_idx"):
-                block.attn.layer_idx = i
-
-            self.h.append(block)
+            self.h.append(GPT3DevBlock(config, is_sparse=(i % 2 == 1), layer_idx=i))
 
         self.ln_f = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_epsilon)
         self.post_init()
-        self._apply_residual_scaling()
+        # NOTE: _apply_residual_scaling is called from GPT3DevLMHeadModel.__init__
+        # AFTER the final post_init(), so it is NOT undone by re-initialization.
 
     def _apply_residual_scaling(self):
-        # GPT-3/GPT-2 modified init
+        # GPT-3/GPT-2 modified init: scale residuals by 1 / sqrt(2 * num_layers)
         scale = 1 / math.sqrt(2 * self.config.num_hidden_layers)
         for block in self.h:
             block.attn.c_proj.weight.data.mul_(scale)
@@ -330,6 +232,9 @@ class GPT3DevLMHeadModel(GPT2LMHeadModel):
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
         self.post_init()
+        # GPT-3 modified init: scale residual projections by 1/sqrt(2*num_layers)
+        # MUST be AFTER the final post_init() which re-initializes all weights
+        self.transformer._apply_residual_scaling()
 
     def forward(
         self,
@@ -356,7 +261,7 @@ class GPT3DevLMHeadModel(GPT2LMHeadModel):
             attention_mask=attention_mask,
             token_type_ids=token_type_ids,
             position_ids=position_ids,
-            head_mask=None,  #compatibility with newer transformers
+            head_mask=None,  # disabled for compatibility with newer transformers
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             output_attentions=output_attentions,
@@ -367,19 +272,19 @@ class GPT3DevLMHeadModel(GPT2LMHeadModel):
 
         hidden_states = transformer_outputs[0]
 
-        # set up for loss computation if labels are provided
+        # Set up for loss computation if labels are provided
         lm_logits = self.lm_head(hidden_states.contiguous())
         
         loss = None
         if labels is not None:
-            #shift so that tokens < n predict n
+            # Shift so that tokens < n predict n
             shift_logits = lm_logits[..., :-1, :].contiguous()
             shift_labels = labels[..., 1:].contiguous()
-            #flatten the tokens
+            # Flatten the tokens
             loss_fct = nn.CrossEntropyLoss()
             shift_logits = shift_logits.view(-1, self.config.vocab_size)
             shift_labels = shift_labels.view(-1)
-            #model parallelism. why not?
+            # Enable model parallelism
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
 
