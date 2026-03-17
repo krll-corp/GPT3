@@ -277,7 +277,11 @@ def evaluate_on_lambada(
             context = ' '.join(tokens[:-1])
             contexts.append(context)
             targets.append(target)
-    
+
+        # Skip this batch if all sentences were too short
+        if len(contexts) == 0:
+            continue
+
         # Tokenize the contexts
         tokenized_inputs = tokenizer(
             contexts,
