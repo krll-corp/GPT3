@@ -30,7 +30,7 @@ def simple_inference(model_path, prompt="He is a doctor. His main goal is", max_
         model_path,
         trust_remote_code=True,
     )
-    model = GPT3DevForCasualLM.from_pretrained(
+    model = GPT3DevLMHeadModel.from_pretrained(
         model_path,
         trust_remote_code=True,
     )
