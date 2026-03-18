@@ -21,7 +21,6 @@ If you want the old "stable" code snapshot, use the `v1-stable` tag/release arch
 - `modeling_gpt3dev.py`: Custom GPT-3-like architecture (`GPT3DevConfig`, sparse+dense attention blocks, HF auto-registration).
 - `eval.py`: Benchmark runner for HellaSwag / LAMBADA / MMLU.
 - `sft.py`: v2 supervised fine-tuning workflow with Harmony-style chat formatting and dataset filtering.
-- `inference_simple.py`: Minimal local generation script.
 - `arch_demonstrator.py`: Build/save architecture-only checkpoint for experiments.
 
 ## Install
@@ -95,10 +94,23 @@ If your base checkpoint path is different, edit it near the top of `sft.py`.
 
 ### 4) Minimal Inference
 
-Edit `local_path` in `inference_simple.py`, then run:
+Run a minimal local generation test with an inline Python snippet:
 
 ```bash
-python3 inference_simple.py
+python3 - <<'PY'
+import torch
+from eval import load_model_and_tokenizer
+
+model, tokenizer = load_model_and_tokenizer(
+    "k050506koch/GPT3-dev-125m",
+    torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    trust_remote_code=True,
+)
+inputs = tokenizer("He is a doctor. His main goal is", return_tensors="pt").to(model.device)
+with torch.no_grad():
+    output = model.generate(**inputs, max_length=50, do_sample=False, pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
+print(tokenizer.decode(output[0], skip_special_tokens=True))
+PY
 ```
 
 ## Pretrained Checkpoints
