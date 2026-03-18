@@ -361,7 +361,9 @@ class GPT3DevLMHeadModel(PreTrainedModel):
         input_ids=None,
         attention_mask=None,
         labels=None,
+        **kwargs  # Accept any additional parameters for version compatibility
     ):
+        # Ignore extra parameters like cache_position that newer transformers versions pass
         transformer_outputs = self.transformer(
             input_ids,
             attention_mask=attention_mask,
