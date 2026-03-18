@@ -6,8 +6,9 @@ that the model produces coherent text. Uses greedy decoding (no sampling).
 """
 import argparse
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoTokenizer
 import legacy.modeling_gpt3dev
+from legacy.modeling_gpt3dev import GPT3DevForCalsualLM
 
 
 def simple_inference(model_path, prompt="He is a doctor. His main goal is", max_length=50):
@@ -29,7 +30,7 @@ def simple_inference(model_path, prompt="He is a doctor. His main goal is", max_
         model_path,
         trust_remote_code=True,
     )
-    model = AutoModelForCausalLM.from_pretrained(
+    model = GPT3DevForCasualLM.from_pretrained(
         model_path,
         trust_remote_code=True,
     )
