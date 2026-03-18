@@ -8,7 +8,7 @@ import argparse
 import torch
 from transformers import AutoTokenizer
 import legacy.modeling_gpt3dev
-from legacy.modeling_gpt3dev import GPT3DevForCalsualLM
+from legacy.modeling_gpt3dev import GPT3DevLMHeadModel
 
 
 def simple_inference(model_path, prompt="He is a doctor. His main goal is", max_length=50):
