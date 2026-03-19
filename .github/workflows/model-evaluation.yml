@@ -96,4 +96,3 @@ jobs:
             --mmlu-tasks abstract_algebra \
             --batch-size 2 \
             --block-size 128
-            --trust_remote_code
