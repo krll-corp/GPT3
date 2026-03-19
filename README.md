@@ -103,14 +103,12 @@ from eval import load_model_and_tokenizer
 model, tokenizer = load_model_and_tokenizer(
     "k050506koch/GPT3-dev-125m",
     torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+    trust_remote_code=True,
 )
 inputs = tokenizer("He is a doctor. His main goal is", return_tensors="pt").to(model.device)
 with torch.no_grad():
-    outputs = model(**inputs)
-logits = outputs[0] if isinstance(outputs, tuple) else outputs.logits
-next_token_id = torch.argmax(logits[:, -1, :], dim=-1)
-generated = torch.cat([inputs["input_ids"], next_token_id.unsqueeze(-1)], dim=-1)
-print(tokenizer.decode(generated[0], skip_special_tokens=True))
+    output = model.generate(**inputs, max_length=50, do_sample=False, pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id)
+print(tokenizer.decode(output[0], skip_special_tokens=True))
 PY
 ```
 
