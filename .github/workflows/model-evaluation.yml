@@ -37,16 +37,14 @@ jobs:
         run: |
           python - <<'PY'
           import torch
-          from eval import load_model_and_tokenizer
+          from transformers import AutoModelForCausalLM, AutoTokenizer
 
           model_name = "${{ matrix.model }}"
           prompt = "He is a doctor. His main goal is"
           device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-          model, tokenizer = load_model_and_tokenizer(
-              model_name,
-              device,
-          )
+          model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True).to(device)
+          tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
           inputs = tokenizer(prompt, return_tensors="pt").to(device)
           input_length = inputs["input_ids"].shape[-1]
 
