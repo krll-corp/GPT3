@@ -37,27 +37,24 @@ jobs:
         run: |
           python - <<'PY'
           import torch
-          from transformers import AutoModelForCausalLM, AutoTokenizer
+          from eval import load_model_and_tokenizer
 
           model_name = "${{ matrix.model }}"
           prompt = "He is a doctor. His main goal is"
           device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-          model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True).to(device)
-          tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+          model, tokenizer = load_model_and_tokenizer(model_name, device)
           inputs = tokenizer(prompt, return_tensors="pt").to(device)
-          input_length = inputs["input_ids"].shape[-1]
 
           with torch.no_grad():
-              outputs = model.generate(
-                  **inputs,
-                  max_length=max(50, input_length + 1),
-                  do_sample=False,
-                  pad_token_id=tokenizer.pad_token_id,
-                  eos_token_id=tokenizer.eos_token_id,
+              outputs = model(
+                  input_ids=inputs["input_ids"],
+                  attention_mask=inputs.get("attention_mask"),
+                  labels=inputs["input_ids"],
               )
 
-          print(tokenizer.decode(outputs[0], skip_special_tokens=True))
+          logits = outputs[1] if isinstance(outputs, tuple) else outputs.logits
+          print(f"logits shape: {tuple(logits.shape)}")
           PY
 
   evaluate:
@@ -97,4 +94,3 @@ jobs:
             --mmlu-tasks abstract_algebra \
             --batch-size 2 \
             --block-size 128
-            --trust-remote-code

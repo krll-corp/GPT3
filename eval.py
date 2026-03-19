@@ -9,6 +9,7 @@ import torch.nn as nn
 from datasets import load_dataset
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
+import legacy.modeling_gpt3dev
 
 def load_model_and_tokenizer(model_path, device, trust_remote_code: bool = False):
     tokenizer = AutoTokenizer.from_pretrained(
