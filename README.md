@@ -103,7 +103,6 @@ from eval import load_model_and_tokenizer
 model, tokenizer = load_model_and_tokenizer(
     "k050506koch/GPT3-dev-125m",
     torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-    trust_remote_code=True,
 )
 inputs = tokenizer("He is a doctor. His main goal is", return_tensors="pt").to(model.device)
 with torch.no_grad():
@@ -121,7 +120,7 @@ Public checkpoints (all of them use v1 architecture):
 - `k050506koch/GPT3-dev-125m-0612`
 - `k050506koch/GPT3-dev-125m-1202`
 
-When you use the shared `eval.py` loader, the local `legacy.modeling_gpt3dev` registration handles these checkpoints without requiring `trust_remote_code`.
+When you use the shared `eval.py` loader, the local `modeling_gpt3dev` registration handles these checkpoints without requiring `trust_remote_code`.
 
 ## Notes And Caveats
 

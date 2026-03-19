@@ -29,7 +29,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install --index-url https://download.pytorch.org/whl/cpu torch
-          pip install "transformers>=4.30.0" datasets tqdm numpy
+          pip install "transformers==4.52.4" datasets tqdm numpy
 
       - name: Run simple inference check
         env:
@@ -46,7 +46,6 @@ jobs:
           model, tokenizer = load_model_and_tokenizer(
               model_name,
               device,
-              trust_remote_code=True,
           )
           inputs = tokenizer(prompt, return_tensors="pt").to(device)
           input_length = inputs["input_ids"].shape[-1]
@@ -86,7 +85,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install --index-url https://download.pytorch.org/whl/cpu torch
-          pip install "transformers>=4.30.0" datasets tqdm numpy
+          pip install "transformers==4.52.4" datasets tqdm numpy
 
       - name: Run evaluation
         env:
@@ -99,5 +98,4 @@ jobs:
             --run-mmlu \
             --mmlu-tasks abstract_algebra \
             --batch-size 2 \
-            --block-size 128 \
-            --trust-remote-code
+            --block-size 128
