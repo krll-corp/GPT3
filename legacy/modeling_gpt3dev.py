@@ -1,10 +1,12 @@
 import math
 import torch
 import torch.nn as nn
+from packaging.version import Version
 from transformers.models.gpt2.configuration_gpt2 import GPT2Config
 from transformers.models.gpt2.modeling_gpt2 import GPT2MLP
 
 from transformers import (
+    __version__ as TRANSFORMERS_VERSION,
     AutoConfig,
     AutoModel,
     AutoModelForCausalLM
@@ -22,6 +24,42 @@ from transformers.models.gpt2.modeling_gpt2 import (
     GPT2MLP,
     CausalLMOutputWithCrossAttentions
 )
+
+IS_TRANSFORMERS_V5 = Version(TRANSFORMERS_VERSION) >= Version("5.0.0")
+
+
+def _normalize_block_args(
+    extra_args,
+    *,
+    head_mask=None,
+    encoder_hidden_states=None,
+    encoder_attention_mask=None,
+    use_cache=False,
+    output_attentions=False,
+):
+    if IS_TRANSFORMERS_V5:
+        if extra_args and encoder_hidden_states is None:
+            encoder_hidden_states = extra_args[0]
+    else:
+        if extra_args:
+            if head_mask is None:
+                head_mask = extra_args[0]
+            if len(extra_args) > 1 and encoder_hidden_states is None:
+                encoder_hidden_states = extra_args[1]
+            if len(extra_args) > 2 and encoder_attention_mask is None:
+                encoder_attention_mask = extra_args[2]
+            if len(extra_args) > 3:
+                use_cache = extra_args[3]
+            if len(extra_args) > 4:
+                output_attentions = extra_args[4]
+
+    return (
+        head_mask,
+        encoder_hidden_states,
+        encoder_attention_mask,
+        use_cache,
+        output_attentions,
+    )
 
 
 class GPT3DevConfig(GPT2Config):
@@ -56,12 +94,17 @@ class GPT3DevSparseAttention(GPT3DevAttention):  # local sparse
         past_key_value=None,
         cache_position=None,
         attention_mask=None,
+        *extra_args,
         head_mask=None,
         encoder_hidden_states=None,
         encoder_attention_mask=None,
         output_attentions=False,
+        past_key_values=None,
         **kwargs,
     ):
+        if past_key_values is not None and past_key_value is None:
+            past_key_value = past_key_values
+
         bsz, tgt_len, _ = hidden_states.size()
         device = hidden_states.device
         dtype = hidden_states.dtype
@@ -97,17 +140,22 @@ class GPT3DevSparseAttention(GPT3DevAttention):  # local sparse
             attention_mask = sparse_mask
         del sparse_mask
 
-        return super().forward(
-            hidden_states,
-            past_key_value=past_key_value,
+        forward_kwargs = dict(
+            hidden_states=hidden_states,
             cache_position=cache_position,
             attention_mask=attention_mask,
-            head_mask=head_mask,
             encoder_hidden_states=encoder_hidden_states,
             encoder_attention_mask=encoder_attention_mask,
             output_attentions=output_attentions,
             **kwargs,
         )
+        if IS_TRANSFORMERS_V5:
+            forward_kwargs["past_key_values"] = past_key_value
+        else:
+            forward_kwargs["past_key_value"] = past_key_value
+            forward_kwargs["head_mask"] = head_mask
+
+        return super().forward(**forward_kwargs)
 
 
 class GPT3DevMLP(GPT2MLP):
@@ -139,28 +187,52 @@ class GPT3DevBlock(GPT2Block):
         past_key_value=None,
         cache_position=None,
         attention_mask=None,
+        *extra_args,
         head_mask=None,
         encoder_hidden_states=None,
         encoder_attention_mask=None,
         use_cache=False,
         output_attentions=False,
+        past_key_values=None,
         **kwargs,
     ):
+        if past_key_values is not None and past_key_value is None:
+            past_key_value = past_key_values
+        (
+            head_mask,
+            encoder_hidden_states,
+            encoder_attention_mask,
+            use_cache,
+            output_attentions,
+        ) = _normalize_block_args(
+            extra_args,
+            head_mask=head_mask,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+        )
+
         if self.use_pre_layernorm:
             # Pre-LayerNorm (GPT-3)
             residual = hidden_states
             hidden_states = self.ln_1(hidden_states)
-            attn_output, attn_weights = self.attn(
-                hidden_states,
-                past_key_value=past_key_value,
+            attn_kwargs = dict(
+                hidden_states=hidden_states,
                 cache_position=cache_position,
                 attention_mask=attention_mask,
-                head_mask=head_mask,
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_attention_mask=encoder_attention_mask,
                 output_attentions=output_attentions,
                 **kwargs,
             )
+            if IS_TRANSFORMERS_V5:
+                attn_kwargs["past_key_values"] = past_key_value
+                attn_output, attn_weights = self.attn(**attn_kwargs)
+            else:
+                attn_kwargs["past_key_value"] = past_key_value
+                attn_kwargs["head_mask"] = head_mask
+                attn_output, attn_weights = self.attn(**attn_kwargs)
             hidden_states = residual + attn_output
 
             residual = hidden_states
@@ -170,17 +242,22 @@ class GPT3DevBlock(GPT2Block):
         else:
             # Post-LayerNorm (GPT-2)
             residual = hidden_states
-            attn_output, attn_weights = self.attn(
-                hidden_states,
-                past_key_value=past_key_value,
+            attn_kwargs = dict(
+                hidden_states=hidden_states,
                 cache_position=cache_position,
                 attention_mask=attention_mask,
-                head_mask=head_mask,
                 encoder_hidden_states=encoder_hidden_states,
                 encoder_attention_mask=encoder_attention_mask,
                 output_attentions=output_attentions,
                 **kwargs,
             )
+            if IS_TRANSFORMERS_V5:
+                attn_kwargs["past_key_values"] = past_key_value
+                attn_output, attn_weights = self.attn(**attn_kwargs)
+            else:
+                attn_kwargs["past_key_value"] = past_key_value
+                attn_kwargs["head_mask"] = head_mask
+                attn_output, attn_weights = self.attn(**attn_kwargs)
             hidden_states = residual + attn_output
             hidden_states = self.ln_1(hidden_states)
 
@@ -188,6 +265,9 @@ class GPT3DevBlock(GPT2Block):
             feed_forward_hidden_states = self.mlp(hidden_states)
             hidden_states = residual + feed_forward_hidden_states
             hidden_states = self.ln_2(hidden_states)
+
+        if IS_TRANSFORMERS_V5:
+            return hidden_states
 
         outputs = (hidden_states,)
         if output_attentions:
@@ -240,40 +320,64 @@ class GPT3DevLMHeadModel(GPT2LMHeadModel):
         self,
         input_ids=None,
         past_key_values=None,
+        cache_position=None,
         attention_mask=None,
         token_type_ids=None,
         position_ids=None,
         head_mask=None,
         inputs_embeds=None,
+        encoder_hidden_states=None,
+        encoder_attention_mask=None,
         labels=None,
         use_cache=None,
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
-        cache_position=None,
+        logits_to_keep=0,
         output_logits=None,  # Force returning full logits even with labels (for debugging/distillation)
+        **kwargs,
     ):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        transformer_outputs = self.transformer(
-            input_ids,
-            past_key_values=past_key_values,
+        transformer_kwargs = dict(
+            input_ids=input_ids,
             attention_mask=attention_mask,
+            cache_position=cache_position,
             token_type_ids=token_type_ids,
             position_ids=position_ids,
-            head_mask=None,  # disabled for compatibility with newer transformers
             inputs_embeds=inputs_embeds,
+            encoder_hidden_states=encoder_hidden_states,
+            encoder_attention_mask=encoder_attention_mask,
             use_cache=use_cache,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-            # cache_position can be omitted; GPT2Model does not require it
+            **kwargs,
+        )
+        if not IS_TRANSFORMERS_V5:
+            transformer_kwargs["head_mask"] = head_mask
+            transformer_kwargs["output_attentions"] = output_attentions
+            transformer_kwargs["output_hidden_states"] = output_hidden_states
+            transformer_kwargs["return_dict"] = return_dict
+        transformer_kwargs["past_key_values"] = past_key_values
+
+        transformer_outputs = self.transformer(**transformer_kwargs)
+
+        hidden_states = (
+            transformer_outputs.last_hidden_state
+            if hasattr(transformer_outputs, "last_hidden_state")
+            else transformer_outputs[0]
         )
 
-        hidden_states = transformer_outputs[0]
-
         # Set up for loss computation if labels are provided
-        lm_logits = self.lm_head(hidden_states.contiguous())
+        compute_full_logits = labels is not None or output_logits or logits_to_keep == 0
+        if compute_full_logits:
+            logits_hidden_states = hidden_states
+        else:
+            slice_indices = (
+                slice(-logits_to_keep, None)
+                if isinstance(logits_to_keep, int)
+                else logits_to_keep
+            )
+            logits_hidden_states = hidden_states[:, slice_indices, :]
+        lm_logits = self.lm_head(logits_hidden_states.contiguous())
         
         loss = None
         if labels is not None:
@@ -294,10 +398,10 @@ class GPT3DevLMHeadModel(GPT2LMHeadModel):
         return CausalLMOutputWithCrossAttentions(
             loss=loss,
             logits=lm_logits,
-            past_key_values=transformer_outputs.past_key_values,
-            hidden_states=transformer_outputs.hidden_states,
-            attentions=transformer_outputs.attentions,
-            cross_attentions=transformer_outputs.cross_attentions,
+            past_key_values=getattr(transformer_outputs, "past_key_values", None),
+            hidden_states=getattr(transformer_outputs, "hidden_states", None),
+            attentions=getattr(transformer_outputs, "attentions", None),
+            cross_attentions=getattr(transformer_outputs, "cross_attentions", None),
         )
 
 
