@@ -29,16 +29,31 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install --index-url https://download.pytorch.org/whl/cpu torch
-          pip install "transformers>4.30.0"
+          pip install "transformers>=4.30.0" datasets tqdm numpy
 
       - name: Run simple inference check
         env:
           TOKENIZERS_PARALLELISM: 'false'
         run: |
-          python simple_inference.py \
-            --model "${{ matrix.model }}" \
-            --prompt "He is a doctor. His main goal is" \
-            --max-length 50
+          python - <<'PY'
+          import torch
+          from eval import load_model_and_tokenizer
+
+          model_name = "${{ matrix.model }}"
+          prompt = "He is a doctor. His main goal is"
+          device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+          model, tokenizer = load_model_and_tokenizer(model_name, device)
+          inputs = tokenizer(prompt, return_tensors="pt").to(device)
+
+          with torch.no_grad():
+              outputs = model(**inputs)
+
+          logits = outputs[0] if isinstance(outputs, tuple) else outputs.logits
+          next_token_id = torch.argmax(logits[:, -1, :], dim=-1)
+          generated = torch.cat([inputs["input_ids"], next_token_id.unsqueeze(-1)], dim=-1)
+          print(tokenizer.decode(generated[0], skip_special_tokens=True))
+          PY
 
   evaluate:
     runs-on: ubuntu-latest
