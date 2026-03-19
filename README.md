@@ -71,8 +71,7 @@ python3 eval.py \
   --run-mmlu \
   --mmlu-tasks abstract_algebra anatomy \
   --batch-size 2 \
-  --block-size 128 \
-  --trust-remote-code
+  --block-size 128
 ```
 
 You can pass either a local checkpoint path or a Hugging Face repo id.
@@ -122,7 +121,7 @@ Public checkpoints (all of them use v1 architecture):
 - `k050506koch/GPT3-dev-125m-0612`
 - `k050506koch/GPT3-dev-125m-1202`
 
-Because this is a custom architecture, load with `trust_remote_code=True` when using Auto classes.
+When you use the shared `eval.py` loader, the local `legacy.modeling_gpt3dev` registration handles these checkpoints without requiring `trust_remote_code`.
 
 ## Notes And Caveats
 
