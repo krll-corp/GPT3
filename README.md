@@ -6,6 +6,10 @@ This repository contains the v2 rewrite of my GPT-3-style research project: cust
 
 If you want the old "stable" code snapshot, use the `v1-stable` tag/release archive.
 
+v1 architecture models: GPT3-dev-125m, GPT3-dev, GPT3-dev-125m-0612, GPT3-dev-125m-1202, GPT3-dev-125m-0104, GPT3-dev-350m-2805
+
+**The most stable transformers version for all models (so far) is transformers==4.52.4**
+
 ## What Changed In v2
 
 - I finally came up with a semi-working strided attention implementation, so the architecture matches (as GPTs told me) the original GPT-3 paper (with sparse+dense attention blocks).
