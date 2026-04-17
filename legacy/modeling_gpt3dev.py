@@ -408,3 +408,73 @@ class GPT3DevLMHeadModel(GPT2LMHeadModel):
 AutoConfig.register("gpt3dev", GPT3DevConfig)
 AutoModel.register(GPT3DevConfig, GPT3DevModel)
 AutoModelForCausalLM.register(GPT3DevConfig, GPT3DevLMHeadModel)
+
+# ---- Transformers 5.x compatibility patch ----
+_ORIG_GPT3DEV_BLOCK_FORWARD = GPT3DevBlock.forward
+_ORIG_GPT3DEV_SPARSE_FORWARD = GPT3DevSparseAttention.forward
+
+def _patched_gpt3dev_block_forward(
+    self,
+    hidden_states,
+    past_key_values=None,
+    attention_mask=None,
+    encoder_hidden_states=None,
+    encoder_attention_mask=None,
+    use_cache=False,
+    **kwargs,
+):
+    cache_position = kwargs.pop("cache_position", None)
+    output_attentions = kwargs.pop("output_attentions", False)
+    head_mask = kwargs.pop("head_mask", None)
+    past_key_value = kwargs.pop("past_key_value", None)
+    if past_key_values is None:
+        past_key_values = past_key_value
+
+    return _ORIG_GPT3DEV_BLOCK_FORWARD(
+        self,
+        hidden_states,
+        past_key_value=past_key_values,
+        cache_position=cache_position,
+        attention_mask=attention_mask,
+        head_mask=head_mask,
+        encoder_hidden_states=encoder_hidden_states,
+        encoder_attention_mask=encoder_attention_mask,
+        use_cache=use_cache,
+        output_attentions=output_attentions,
+        **kwargs,
+    )
+
+
+def _patched_gpt3dev_sparse_forward(
+    self,
+    hidden_states,
+    past_key_values=None,
+    attention_mask=None,
+    encoder_hidden_states=None,
+    encoder_attention_mask=None,
+    output_attentions=False,
+    **kwargs,
+):
+    cache_position = kwargs.pop("cache_position", None)
+    head_mask = kwargs.pop("head_mask", None)
+    past_key_value = kwargs.pop("past_key_value", None)
+    if past_key_values is None:
+        past_key_values = past_key_value
+
+    return _ORIG_GPT3DEV_SPARSE_FORWARD(
+        self,
+        hidden_states,
+        past_key_value=past_key_values,
+        cache_position=cache_position,
+        attention_mask=attention_mask,
+        head_mask=head_mask,
+        encoder_hidden_states=encoder_hidden_states,
+        encoder_attention_mask=encoder_attention_mask,
+        output_attentions=output_attentions,
+        **kwargs,
+    )
+
+
+GPT3DevBlock.forward = _patched_gpt3dev_block_forward
+GPT3DevSparseAttention.forward = _patched_gpt3dev_sparse_forward
+# ---- End compatibility patch ----
