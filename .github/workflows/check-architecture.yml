@@ -1,0 +1,37 @@
+name: Check-Architecture
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  check-stable:
+    runs-on: ubuntu-24.04
+
+    strategy:
+      fail-fast: false
+      matrix:
+        transformers-version: ["4.52.4", "latest"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install -r requirements.txt
+          if [ "${{ matrix.transformers-version }}" = "latest" ]; then pip install -U transformers; else pip install "transformers==${{ matrix.transformers-version }}"; fi
+
+      - name: Test forward
+        run: python -c 'import torch; from modeling_gpt3dev import GPT3DevLMHeadModel; m=GPT3DevLMHeadModel(); x=torch.randint(0,m.config.vocab_size,(2,16)); assert m(input_ids=x).logits.shape[:2]==x.shape; print("forward ok")'
+
+      - name: Test save/load/generate
+        run: python -c 'import torch; from modeling_gpt3dev import GPT3DevLMHeadModel; m=GPT3DevLMHeadModel(); m.save_pretrained("temp-dir"); m=GPT3DevLMHeadModel.from_pretrained("temp-dir"); x=torch.randint(0,m.config.vocab_size,(2,8)); y=m.generate(input_ids=x,max_new_tokens=4,pad_token_id=getattr(m.config,"eos_token_id",50256)); assert y.shape[0]==2 and y.shape[1]==12; print("save/load/generate ok")'
